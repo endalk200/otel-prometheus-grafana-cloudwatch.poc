@@ -1,4 +1,7 @@
 services:
+  # =============================================================================
+  # User API Application
+  # =============================================================================
   user-api:
     build:
       context: .
@@ -9,8 +12,12 @@ services:
       - GIN_MODE=release
       - PORT=8080
       - DATA_PATH=/app/data/users.json
+      - OTEL_EXPORTER_OTLP_ENDPOINT=alloy:4317
+      - OTEL_SERVICE_NAME=user-api
     volumes:
       - user-data:/app/data
+    networks:
+      - observability
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
@@ -18,6 +25,117 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    depends_on:
+      - alloy
 
+  # =============================================================================
+  # Grafana Alloy - Telemetry Collector
+  # =============================================================================
+  alloy:
+    image: grafana/alloy:latest
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "12345:12345" # Alloy UI
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --stability.level=generally-available
+    networks:
+      - observability
+    restart: unless-stopped
+
+  # =============================================================================
+  # Prometheus - Metrics Storage
+  # =============================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-remote-write-receiver'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - observability
+    restart: unless-stopped
+
+  # =============================================================================
+  # Loki - Logs Storage
+  # =============================================================================
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki/local-config.yaml
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - observability
+    restart: unless-stopped
+
+  # =============================================================================
+  # Tempo - Traces Storage
+  # =============================================================================
+  tempo:
+    image: grafana/tempo:latest
+    ports:
+      - "3200:3200"   # Tempo HTTP
+      - "4317"        # OTLP gRPC (internal)
+    volumes:
+      - ./observability/tempo/tempo-config.yml:/etc/tempo/tempo.yaml
+      - tempo-data:/var/tempo
+    command: -config.file=/etc/tempo/tempo.yaml
+    networks:
+      - observability
+    restart: unless-stopped
+
+  # =============================================================================
+  # Grafana - Visualization
+  # =============================================================================
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    networks:
+      - observability
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  observability:
+    driver: bridge
+
+# =============================================================================
+# Volumes
+# =============================================================================
 volumes:
   user-data:
+  prometheus-data:
+  loki-data:
+  tempo-data:
+  grafana-data:
